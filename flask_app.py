@@ -773,6 +773,163 @@ def reactivate_resident():
             conn.close()
 
 
+@app.route('/fetch_resident_management_data', methods=['POST'])
+@jwt_required()
+def fetch_resident_management_data():
+    data = request.get_json()
+    selected_resident_name = data['selected_resident_name']
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Fetch all resident names
+        cursor.execute("SELECT name FROM residents")
+        resident_names = [row[0] for row in cursor.fetchall()]
+        resident_names.sort()
+
+        # Fetch active resident names
+        cursor.execute("SELECT name FROM residents WHERE is_active = TRUE")
+        active_resident_names = [row[0] for row in cursor.fetchall()]
+        active_resident_names.sort()
+
+        if selected_resident_name is None:
+            if not active_resident_names:
+                return jsonify({'error': 'No active residents found'}), 404
+            selected_resident_name = active_resident_names[0]
+
+        # Fetch user initials
+        username = get_jwt_identity()
+        cursor.execute("SELECT initials FROM users WHERE username = %s", (username,))
+        user_initials = cursor.fetchone()[0]
+
+        # Fetch ADL data for the current date
+        resident_id = get_resident_id(selected_resident_name)
+        cursor.execute('''
+            SELECT * FROM adl_chart
+            WHERE resident_id = %s AND chart_date = %s
+        ''', (resident_id, today))
+        adl_result = cursor.fetchone()
+        if adl_result:
+            columns = [col[0] for col in cursor.description]
+            existing_adl_data = {columns[i]: adl_result[i] for i in range(3, len(columns))}
+        else:
+            existing_adl_data = {}
+
+        # Fetch care levels
+        cursor.execute('''
+            SELECT level_of_care, name FROM residents
+        ''')
+        resident_care_levels = [{'level_of_care': row[0], 'name': row[1]} for row in cursor.fetchall()]
+
+        # Fetch EMAR data
+        cursor.execute('''
+            SELECT m.medication_name, e.time_slot, e.administered
+            FROM emar_chart e
+            JOIN medications m ON e.medication_id = m.id
+            WHERE e.resident_id = (SELECT id FROM residents WHERE name = %s)
+        ''', (selected_resident_name,))
+        emar_results = cursor.fetchall()
+        existing_emar_data = {}
+        for med_name, time_slot, administered in emar_results:
+            if med_name not in existing_emar_data:
+                existing_emar_data[med_name] = {}
+            existing_emar_data[med_name][time_slot] = administered
+
+        # Fetch medications
+        cursor.execute('''
+            SELECT medication_name, discontinued_date FROM medications 
+            WHERE resident_id = (SELECT id FROM residents WHERE name = %s)
+        ''', (selected_resident_name,))
+        medication_results = cursor.fetchall()
+
+        all_medications_data = {'Scheduled': {}, 'PRN': {}, 'Controlled': {}}
+        active_medications = []
+
+        for med_name, discontinued_date in medication_results:
+            if discontinued_date is None or datetime.now().date() < discontinued_date:
+                active_medications.append(med_name)
+
+        cursor.execute('''
+            SELECT m.medication_name, m.dosage, m.instructions, ts.slot_name
+            FROM medications m
+            JOIN medication_time_slots mts ON m.id = mts.medication_id
+            JOIN time_slots ts ON mts.time_slot_id = ts.id
+            WHERE m.resident_id = (SELECT id FROM residents WHERE name = %s) AND m.medication_type = 'Scheduled'
+        ''', (selected_resident_name,))
+        scheduled_results = cursor.fetchall()
+        for med_name, dosage, instructions, time_slot in scheduled_results:
+            if time_slot not in all_medications_data['Scheduled']:
+                all_medications_data['Scheduled'][time_slot] = {}
+            all_medications_data['Scheduled'][time_slot][med_name] = {
+                'dosage': decrypt_data(dosage), 'instructions': decrypt_data(instructions)}
+
+        cursor.execute('''
+            SELECT medication_name, dosage, instructions
+            FROM medications 
+            WHERE resident_id = (SELECT id FROM residents WHERE name = %s) AND medication_type = 'As Needed (PRN)'
+        ''', (selected_resident_name,))
+        prn_results = cursor.fetchall()
+        for med_name, dosage, instructions in prn_results:
+            all_medications_data['PRN'][med_name] = {
+                'dosage': decrypt_data(dosage), 'instructions': decrypt_data(instructions)}
+
+        cursor.execute('''
+            SELECT medication_name, dosage, instructions, count, medication_form
+            FROM medications 
+            WHERE resident_id = (SELECT id FROM residents WHERE name = %s) AND medication_type = 'Controlled'
+        ''', (selected_resident_name,))
+        controlled_results = cursor.fetchall()
+        for med_name, dosage, instructions, count, medication_form in controlled_results:
+            all_medications_data['Controlled'][med_name] = {
+                'dosage': decrypt_data(dosage), 'instructions': decrypt_data(instructions), 'count': count, 'form': medication_form}
+
+        # Fetch non-medication orders
+        cursor.execute('''
+            SELECT order_id, order_name, frequency, specific_days, special_instructions, discontinued_date, last_administered_date
+            FROM non_medication_orders WHERE resident_id = (SELECT id FROM residents WHERE name = %s)
+        ''', (selected_resident_name,))
+        non_medication_orders = cursor.fetchall()
+
+        # Convert the result to a list of dictionaries
+        non_medication_orders = [
+            {
+                'order_id': order[0],
+                'order_name': order[1],
+                'frequency': order[2],
+                'specific_days': order[3],
+                'special_instructions': order[4],
+                'discontinued_date': order[5],
+                'last_administered_date': order[6]
+            }
+            for order in non_medication_orders
+        ]
+
+        result = {
+            'resident_names': resident_names,
+            'user_initials': user_initials,
+            'resident_info': None,
+            'existing_adl_data': existing_adl_data,
+            'resident_care_levels': resident_care_levels,
+            'existing_emar_data': existing_emar_data,
+            'all_medications_data': all_medications_data,
+            'active_medications': active_medications,
+            'non_medication_orders': non_medication_orders
+        }
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    finally:
+        if conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+
 # ------------------------------------ adl_chart Table ------------------------------------ #
 
 @app.route('/fetch_adl_data_for_resident/<resident_name>', methods=['GET'])
@@ -1145,38 +1302,6 @@ def fetch_medications_for_resident(resident_name):
     
     return jsonify(medications_data)
 
-
-# @app.route('/filter_active_medications', methods=['POST'])
-# @jwt_required()
-# def filter_active_medications():
-#     # Assuming you're receiving a list of medication names and a resident name in the request JSON
-#     data = request.get_json()
-#     medication_names = data.get('medication_names', [])
-#     resident_name = data.get('resident_name', '')
-#     active_medications = []
-
-#     try:
-#         conn = get_db_connection()
-#         if conn is not None:
-#             with conn.cursor() as cursor:
-#                 for med_name in medication_names:
-#                     cursor.execute('''
-#                         SELECT discontinued_date FROM medications
-#                         JOIN residents ON medications.resident_id = residents.id
-#                         WHERE residents.name = %s AND medications.medication_name = %s
-#                     ''', (resident_name, med_name))
-#                     result = cursor.fetchone()
-
-#                     # Check if the medication is discontinued and if the discontinuation date is past the current date
-#                     if result is None or (result[0] is None or datetime.now().date() < result[0]):
-#                         active_medications.append(med_name)
-
-#             return jsonify(active_medications=active_medications), 200
-#     except Exception as e:
-#         return jsonify({'error': str(e)}), 500
-#     finally:
-#         if conn.is_connected():
-#             conn.close()
 
 @app.route('/filter_active_medications', methods=['POST'])
 @jwt_required()
