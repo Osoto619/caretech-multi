@@ -72,13 +72,6 @@ def get_db_connection():
             database=jawsdb_url.path[1:],
             port=jawsdb_url.port
         )
-        # DEVELOPMENT ONLY: REMOVE FOR PRODUCTION
-        # connection = mysql.connector.connect(
-        #     user='vjzhnh87kpyhjhmg',
-        #     password='tf0yvxgqv6yyekdc',
-        #     host= 'sulnwdk5uwjw1r2k.cbetxkdyhwsb.us-east-1.rds.amazonaws.com',
-        #     database='d6cr9pq41dg85nvo'
-        # )
         
     except Error as err:
         print(f"Error: '{err}'")
@@ -323,7 +316,6 @@ def validate_login():
             return jsonify({'error': 'Failed to connect to the database'}), 500
     except Error as e:
         return jsonify({'error': str(e)}), 500
-
 
 
 @app.route('/needs_password_reset', methods=['POST'])
@@ -1904,28 +1896,32 @@ def record_non_med_order_performance():
             cursor.close()
             conn.close()
 
-
 @app.route('/fetch_non_med_orders_for_resident', methods=['POST'])
 @jwt_required()
 def fetch_non_med_orders_for_resident():
     data = request.get_json()
     resident_name = data['resident_name']
+    facility_id = data['facility_id']  # Fetch facility_id from the request
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Fetch resident_id using the helper function
-        resident_id = get_resident_id(resident_name)
+        # Fetch resident_id using the helper function, now include facility_id
+        resident_id = get_resident_id(resident_name, facility_id)
 
-        # Execute the query using the resident_id
+        if not resident_id:
+            return jsonify({'error': f"Resident named {resident_name} not found in facility {facility_id}"}), 404
+
+        # Execute the query using the resident_id and facility_id
         cursor.execute('''
             SELECT non_medication_orders.order_name, non_med_order_administrations.administration_date, non_med_order_administrations.notes, non_med_order_administrations.initials
             FROM non_medication_orders
             JOIN non_med_order_administrations ON non_medication_orders.order_id = non_med_order_administrations.order_id
-            WHERE non_medication_orders.resident_id = %s
+            WHERE non_medication_orders.resident_id = %s AND non_medication_orders.facility_id = %s
             ORDER BY non_med_order_administrations.administration_date DESC
-        ''', (resident_id,))
+        ''', (resident_id, facility_id))
+
         orders = cursor.fetchall()
 
         non_med_orders = {}
@@ -1940,6 +1936,64 @@ def fetch_non_med_orders_for_resident():
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    finally:
+        if conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+@app.route('/fetch_non_med_order_data_for_day', methods=['POST'])
+@jwt_required()
+def fetch_non_med_order_data_for_day():
+    data = request.get_json()
+    resident_name = data.get('resident_name')
+    order_name = data.get('order_name')
+    year_month = data.get('year_month')
+    day = data.get('day')
+    facility_id = data.get('facility_id')  # Fetch facility_id from the request
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Fetch the resident_id
+        resident_id = get_resident_id(resident_name, facility_id)
+        if not resident_id:
+            return jsonify({'error': 'Resident not found'}), 404
+
+        # Fetch the order_id
+        cursor.execute('''
+            SELECT order_id FROM non_medication_orders 
+            WHERE resident_id = %s AND order_name = %s AND facility_id = %s
+        ''', (resident_id, order_name, facility_id))
+        order_result = cursor.fetchone()
+        if not order_result:
+            return jsonify({'error': 'Order not found'}), 404
+        order_id = order_result[0]
+
+        # Fetch the non-medication order administration data for the specific day
+        date = f'{year_month}-{day}'
+        cursor.execute('''
+            SELECT administration_date, initials, notes
+            FROM non_med_order_administrations
+            WHERE order_id = %s AND resident_id = %s AND facility_id = %s AND DATE(administration_date) = %s
+        ''', (order_id, resident_id, facility_id, date))
+        results = cursor.fetchall()
+
+        non_med_order_data = [
+            {
+                'date': str(row[0]),
+                'administered': row[1],
+                'notes': row[2]
+            }
+            for row in results
+        ]
+
+        return jsonify({'non_med_order_data': non_med_order_data}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
     finally:
         if conn.is_connected():
             cursor.close()
@@ -2149,6 +2203,7 @@ def save_prn_administration_data():
     resident_name = data['resident_name']
     medication_name = data['medication_name']
     admin_data = data['admin_data']
+    facility_id = data['facility_id']
     username = get_jwt_identity()
 
     # Extracting date and time from the 'datetime' string
@@ -2186,7 +2241,7 @@ def save_prn_administration_data():
         datetime_str = f"{admin_date} {admin_time}" if admin_time else admin_date
         log_message = f"PRN Administered {medication_name} to {resident_name} at {datetime_str}"
         
-        log_action(username, 'PRN Administration', log_message)
+        log_action(username, 'PRN Administration', log_message, facility_id)
         
         return jsonify({'message': 'Administration data saved successfully'}), 201
     except Exception as e:
@@ -2962,7 +3017,7 @@ def add_tracked_item_facility():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=True)
+    app.run(host='0.0.0.0', debug=False)
     
     
     
