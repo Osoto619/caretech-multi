@@ -18,6 +18,9 @@ app = Flask(__name__)
 # Ensure you have a secret key set for JWT to use
 app.config['JWT_SECRET_KEY'] = 'fSdas23#%@adY'  # Change this!
 
+# Set the expiration time for the JWT token (e.g., 12 hours)
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=12)
+
 jwt = JWTManager(app)  # Initialize Flask-JWT-Extended with your Flask app
 
 
