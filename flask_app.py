@@ -2168,10 +2168,9 @@ def save_emar_data_from_management_window():
     return jsonify(responses)
 
 
-
-@app.route('/does_emars_chart_exist/<resident_name>/<year_month>', methods=['GET'])
-def does_emars_chart_data_exist(resident_name, year_month):
-    resident_id = get_resident_id(resident_name)
+@app.route('/does_emars_chart_exist/<resident_name>/<year_month>/<facility_id>', methods=['GET'])
+def does_emars_chart_data_exist(resident_name, year_month, facility_id):
+    resident_id = get_resident_id(resident_name, facility_id)
     if resident_id is None:
         return jsonify({'error': f"Resident named {resident_name} not found"}), 404
 
@@ -2186,10 +2185,11 @@ def does_emars_chart_data_exist(resident_name, year_month):
                 WHERE resident_id = %s 
                 AND YEAR(chart_date) = %s 
                 AND MONTH(chart_date) = %s
+                AND facility_id = %s
             )
         '''
-        print(f"Executing eMARs existence check with resident_id: {resident_id}, year: {year}, month: {month}")
-        cursor.execute(query, (resident_id, year, month))
+        print(f"Executing eMARs existence check with resident_id: {resident_id}, year: {year}, month: {month}, facility_id: {facility_id}")
+        cursor.execute(query, (resident_id, year, month, facility_id))
         exists = cursor.fetchone()[0]
         return jsonify({'exists': bool(exists)}), 200
     except Exception as e:
